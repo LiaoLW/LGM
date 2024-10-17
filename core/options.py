@@ -20,6 +20,8 @@ class Options:
     output_size: int = 256
 
     ### dataset
+    # dataset path
+    data_path: str = "./data/objaverse"
     # data mode (only support s3 now)
     data_mode: Literal['s3'] = 's3'
     # fovy of the dataset
@@ -70,7 +72,7 @@ class Options:
     force_cuda_rast: bool = False
     # render fancy video with gaussian scaling effect
     fancy_video: bool = False
-    
+
 
 # all the default settings
 config_defaults: Dict[str, Options] = {}
