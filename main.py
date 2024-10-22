@@ -16,7 +16,10 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 
 def main():
     opt = tyro.cli(AllConfigs)
-    opt.workspace = f"{opt.workspace}/{time.strftime('%Y%m%d_%H%M%S')}"
+    if opt.exp is not None:
+        opt.workspace = f"{opt.workspace}/{opt.exp}"
+    else:
+        opt.workspace = f"{opt.workspace}/{time.strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(opt.workspace, exist_ok=True)
 
     # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -86,8 +89,18 @@ def main():
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3000, eta_min=1e-6)
     total_steps = opt.num_epochs * len(train_dataloader)
     pct_start = 30 / total_steps
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=opt.lr, total_steps=total_steps, pct_start=pct_start)
-
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.95,
+        patience=10,
+        verbose=True,
+        threshold=0.0001,
+        threshold_mode="rel",
+        cooldown=0,
+        min_lr=1e-5,
+        eps=1e-08,
+    )
     # accelerate
     model, optimizer, train_dataloader, test_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, test_dataloader, scheduler
@@ -116,7 +129,8 @@ def main():
                     accelerator.clip_grad_norm_(model.parameters(), opt.gradient_clip)
 
                 optimizer.step()
-                scheduler.step()
+                scheduler.step(loss)
+                run["train/learning_rate"].log(optimizer.param_groups[0]["lr"])
 
                 total_loss += loss.detach()
                 total_psnr += psnr.detach()
@@ -126,8 +140,9 @@ def main():
                 # logging
                 if i % 100 == 0:
                     mem_free, mem_total = torch.cuda.mem_get_info()
+                    last_lr = optimizer.param_groups[0]["lr"]
                     print(
-                        f"[INFO] {i}/{len(train_dataloader)} mem: {(mem_total-mem_free)/1024**3:.2f}/{mem_total/1024**3:.2f}G lr: {scheduler.get_last_lr()[0]:.7f} step_ratio: {step_ratio:.4f} loss: {loss.item():.6f}"
+                        f"[INFO] {i}/{len(train_dataloader)} mem: {(mem_total-mem_free)/1024**3:.2f}/{mem_total/1024**3:.2f}G lr: {last_lr:.7f} step_ratio: {step_ratio:.4f} loss: {loss.item():.6f}"
                     )
 
                 # save log images
@@ -142,11 +157,12 @@ def main():
                         f"{opt.workspace}/train/images_{epoch}_{i}_gt.jpg",
                         gt_images,
                     )
-                    run["train/images"].append(
-                        neptune.types.File(
-                            f"{opt.workspace}/train/images_{epoch}_{i}_gt.jpg"
+                    if epoch % 20 == 0:
+                        run["train/images"].append(
+                            neptune.types.File(
+                                f"{opt.workspace}/train/images_{epoch}_{i}_gt.jpg"
+                            )
                         )
-                    )
 
                     # gt_alphas = data['masks_output'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
                     # gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, gt_alphas.shape[1] * gt_alphas.shape[3], 1)
@@ -162,11 +178,12 @@ def main():
                         f"{opt.workspace}/train/images_{epoch}_{i}_pred.jpg",
                         pred_images,
                     )
-                    run["train/images"].append(
-                        neptune.types.File(
-                            f"{opt.workspace}/train/images_{epoch}_{i}_pred.jpg"
+                    if epoch % 20 == 0:
+                        run["train/images"].append(
+                            neptune.types.File(
+                                f"{opt.workspace}/train/images_{epoch}_{i}_pred.jpg"
+                            )
                         )
-                    )
 
                     # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
                     # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
@@ -204,11 +221,12 @@ def main():
                     kiui.write_image(
                         f"{opt.workspace}/eval_gt/images_{epoch}_{i}_gt.jpg", gt_images
                     )
-                    run["eval/images"].append(
-                        neptune.types.File(
-                            f"{opt.workspace}/eval_gt/images_{epoch}_{i}_gt.jpg"
+                    if epoch % 20 == 0:
+                        run["eval/images"].append(
+                            neptune.types.File(
+                                f"{opt.workspace}/eval_gt/images_{epoch}_{i}_gt.jpg"
+                            )
                         )
-                    )
 
                     pred_images = out['images_pred'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
                     pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(-1, pred_images.shape[1] * pred_images.shape[3], 3)
@@ -216,11 +234,12 @@ def main():
                         f"{opt.workspace}/eval_pred/images_{epoch}_{i}_pred.jpg",
                         pred_images,
                     )
-                    run["eval/images"].append(
-                        neptune.types.File(
-                            f"{opt.workspace}/eval_pred/images_{epoch}_{i}_pred.jpg"
+                    if epoch % 20 == 0:
+                        run["eval/images"].append(
+                            neptune.types.File(
+                                f"{opt.workspace}/eval_pred/images_{epoch}_{i}_pred.jpg"
+                            )
                         )
-                    )
 
                     # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
                     # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
@@ -232,7 +251,6 @@ def main():
             if accelerator.is_main_process:
                 total_psnr /= len(test_dataloader)
                 accelerator.print(f"[eval] epoch: {epoch} psnr: {psnr:.4f}")
-
 
 
 if __name__ == "__main__":

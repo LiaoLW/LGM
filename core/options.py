@@ -42,6 +42,7 @@ class Options:
     ### training
     # workspace
     workspace: str = './workspace'
+    exp: str = None
     # resume
     resume: Optional[str] = None
     # batch size (per-GPU)

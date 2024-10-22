@@ -1,5 +1,5 @@
 __pycache__/
-core/
+core/__pycache__/
 .vscode/
 workspace*
 .neptune
