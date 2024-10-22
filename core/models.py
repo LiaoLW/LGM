@@ -211,7 +211,8 @@ class LGM(nn.Module):
                 else:
                     run["eval/loss_lpips"].log(loss_lpips.item())
             lambda_lpips = self.opt.lambda_lpips * max(min(step_ratio * 1.67, 1.0), 0.0)
-            loss = loss + lambda_lpips * loss_lpips
+            # loss = loss + lambda_lpips * loss_lpips
+            loss = loss + self.opt.lambda_lpips * loss_lpips
 
         results["loss"] = loss
 
