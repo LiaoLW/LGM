@@ -61,6 +61,13 @@ class LGM(nn.Module):
                 del state_dict[k]
         return state_dict
 
+    def load_state_dict(self, state_dict, strict=True):
+        # add lpips_loss
+        state_dict["lpips_loss"] = LPIPS(net="vgg")
+        state_dict["lpips_loss"].requires_grad_(False)
+        super().load_state_dict(state_dict, strict=strict)
+        return [], []
+
     def prepare_default_rays(self, device, elevation=0):
 
         from kiui.cam import orbit_camera

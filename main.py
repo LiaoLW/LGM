@@ -2,6 +2,7 @@ import tyro
 import time
 import random
 import os
+import sys
 
 import torch
 from core.options import AllConfigs
@@ -12,14 +13,93 @@ import neptune
 
 import kiui
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+sys.path.append(os.getcwd())
+
+
+def train_step(
+    accelerator,
+    model,
+    step,
+    step_ratio,
+    data,
+    optimizer,
+    scheduler,
+    train_dataloader,
+    epoch,
+    opt,
+    run,
+):
+    with accelerator.accumulate(model):
+
+        optimizer.zero_grad()
+
+        out = model(data, step_ratio, run=run)
+        loss = out["loss"]
+        psnr = out["psnr"]
+        accelerator.backward(loss)
+
+        # gradient clipping
+        if accelerator.sync_gradients:
+            accelerator.clip_grad_norm_(model.parameters(), opt.gradient_clip)
+
+        optimizer.step()
+        scheduler.step(loss)
+        run["train/learning_rate"].log(optimizer.param_groups[0]["lr"])
+
+        return out
+
+
+def save_image(data, out, epoch, opt, run, step, mode="train"):
+    os.makedirs(f"{opt.workspace}/{mode}", exist_ok=True)
+    gt_images = (
+        data["images_output"].detach().cpu().numpy()
+    )  # [B, V, 3, output_size, output_size]
+    gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(
+        -1, gt_images.shape[1] * gt_images.shape[3], 3
+    )  # [B*output_size, V*output_size, 3]
+    kiui.write_image(
+        f"{opt.workspace}/{mode}/images_{epoch}_{step}_gt.jpg",
+        gt_images,
+    )
+    if epoch % 20 == 0:
+        run[f"{mode}/images"].append(
+            neptune.types.File(f"{opt.workspace}/{mode}/images_{epoch}_{step}_gt.jpg")
+        )
+
+    # gt_alphas = data['masks_output'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
+    # gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, gt_alphas.shape[1] * gt_alphas.shape[3], 1)
+    # kiui.write_image(f'{opt.workspace}/{mode}/gt_alphas_{epoch}_{i}.jpg', gt_alphas)
+
+    pred_images = (
+        out["images_pred"].detach().cpu().numpy()
+    )  # [B, V, 3, output_size, output_size]
+    pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(
+        -1, pred_images.shape[1] * pred_images.shape[3], 3
+    )
+    kiui.write_image(
+        f"{opt.workspace}/{mode}/images_{epoch}_{step}_pred.jpg",
+        pred_images,
+    )
+    if epoch % 20 == 0:
+        run[f"{mode}/images"].append(
+            neptune.types.File(f"{opt.workspace}/{mode}/images_{epoch}_{step}_pred.jpg")
+        )
+
+    # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
+    # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
+    # kiui.write_image(f'{opt.workspace}/{mode}/pred_alphas_{epoch}_{i}.jpg', pred_alphas)
 
 
 def main():
     opt = tyro.cli(AllConfigs)
-    if opt.exp is not None:
-        opt.workspace = f"{opt.workspace}/{opt.exp}"
+    if opt.resume is not None:
+        suffix = "resume_" + opt.resume.split("/")[-1]
     else:
-        opt.workspace = f"{opt.workspace}/{time.strftime('%Y%m%d_%H%M%S')}"
+        suffix = f"{time.strftime('%Y%m%d_%H%M')}"
+    if opt.exp is not None:
+        opt.workspace = f"{opt.workspace}/{opt.exp}/{suffix}"
+    else:
+        opt.workspace = f"{opt.workspace}/{suffix}"
     os.makedirs(opt.workspace, exist_ok=True)
 
     # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -37,24 +117,25 @@ def main():
     run = neptune.init_run(project="LGM", source_files=["*.py"])
     run["parameters"] = opt.__dict__
 
-    # resume
-    if opt.resume is not None:
-        if opt.resume.endswith('safetensors'):
-            ckpt = load_file(opt.resume, device='cpu')
-        else:
-            ckpt = torch.load(opt.resume, map_location='cpu')
+    # # resume
+    # if opt.resume is not None:
+    #     if opt.resume.endswith('safetensors'):
+    #         ckpt = load_file(opt.resume, device='cpu')
+    #     else:
+    #         ckpt = torch.load(opt.resume, map_location='cpu')
 
-        # tolerant load (only load matching shapes)
-        # model.load_state_dict(ckpt, strict=False)
-        state_dict = model.state_dict()
-        for k, v in ckpt.items():
-            if k in state_dict: 
-                if state_dict[k].shape == v.shape:
-                    state_dict[k].copy_(v)
-                else:
-                    accelerator.print(f'[WARN] mismatching shape for param {k}: ckpt {v.shape} != model {state_dict[k].shape}, ignored.')
-            else:
-                accelerator.print(f'[WARN] unexpected param {k}: {v.shape}')
+    #     # tolerant load (only load matching shapes)
+    #     # model.load_state_dict(ckpt, strict=False)
+    #     state_dict = model.state_dict()
+    #     for k, v in ckpt.items():
+    #         if k in state_dict:
+    #             if state_dict[k].shape == v.shape:
+    #                 print(f"[INFO] loading {k}")
+    #                 state_dict[k].copy_(v)
+    #             else:
+    #                 accelerator.print(f'[WARN] mismatching shape for param {k}: ckpt {v.shape} != model {state_dict[k].shape}, ignored.')
+    #         else:
+    #             accelerator.print(f'[WARN] unexpected param {k}: {v.shape}')
 
     # data
     if opt.data_mode == 's3':
@@ -92,7 +173,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
-        factor=0.95,
+        factor=0.98,
         patience=10,
         verbose=True,
         threshold=0.0001,
@@ -105,6 +186,26 @@ def main():
     model, optimizer, train_dataloader, test_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, test_dataloader, scheduler
     )
+    # accelerator.register_for_checkpointing(scheduler)
+    if opt.resume:
+        accelerator.load_state(os.path.join(os.getcwd(), opt.resume))
+
+    # eval for resume
+    if opt.resume:
+        with torch.no_grad():
+            model.eval()
+            total_psnr = 0
+            for step, data in enumerate(test_dataloader):
+                out = model(data, run=run)
+                psnr = out["psnr"]
+                run["eval/psnr"].log(psnr.item())
+                total_psnr += psnr.detach()
+            torch.cuda.empty_cache()
+
+            total_psnr = accelerator.gather_for_metrics(total_psnr).mean()
+            if accelerator.is_main_process:
+                total_psnr /= len(test_dataloader)
+                accelerator.print(f"[eval] resume: psnr: {psnr:.4f}")
 
     # loop
     for epoch in range(opt.num_epochs):
@@ -112,82 +213,39 @@ def main():
         model.train()
         total_loss = 0
         total_psnr = 0
-        for i, data in enumerate(train_dataloader):
-            with accelerator.accumulate(model):
-
-                optimizer.zero_grad()
-
-                step_ratio = (epoch + i / len(train_dataloader)) / opt.num_epochs
-
-                out = model(data, step_ratio, run=run)
-                loss = out["loss"]
-                psnr = out["psnr"]
-                accelerator.backward(loss)
-
-                # gradient clipping
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), opt.gradient_clip)
-
-                optimizer.step()
-                scheduler.step(loss)
-                run["train/learning_rate"].log(optimizer.param_groups[0]["lr"])
-
-                total_loss += loss.detach()
-                total_psnr += psnr.detach()
+        for step, data in enumerate(train_dataloader):
+            step_ratio = (epoch + step / len(train_dataloader)) / opt.num_epochs
+            out = train_step(
+                accelerator,
+                model,
+                step,
+                step_ratio,
+                data,
+                optimizer,
+                scheduler,
+                train_dataloader,
+                epoch,
+                opt,
+                run,
+            )
+            loss = out["loss"]
+            psnr = out["psnr"]
+            total_loss += loss.detach()
+            total_psnr += psnr.detach()
 
             if accelerator.is_main_process:
                 os.makedirs(f"{opt.workspace}/train", exist_ok=True)
                 # logging
-                if i % 100 == 0:
+                if step % 100 == 0:
                     mem_free, mem_total = torch.cuda.mem_get_info()
                     last_lr = optimizer.param_groups[0]["lr"]
                     print(
-                        f"[INFO] {i}/{len(train_dataloader)} mem: {(mem_total-mem_free)/1024**3:.2f}/{mem_total/1024**3:.2f}G lr: {last_lr:.7f} step_ratio: {step_ratio:.4f} loss: {loss.item():.6f}"
+                        f"[INFO] {step}/{len(train_dataloader)} mem: {(mem_total-mem_free)/1024**3:.2f}/{mem_total/1024**3:.2f}G lr: {last_lr:.7f} step_ratio: {step_ratio:.4f} loss: {loss.item():.6f}"
                     )
 
                 # save log images
-                if i % 1000 == 0:
-                    gt_images = (
-                        data["images_output"].detach().cpu().numpy()
-                    )  # [B, V, 3, output_size, output_size]
-                    gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(
-                        -1, gt_images.shape[1] * gt_images.shape[3], 3
-                    )  # [B*output_size, V*output_size, 3]
-                    kiui.write_image(
-                        f"{opt.workspace}/train/images_{epoch}_{i}_gt.jpg",
-                        gt_images,
-                    )
-                    if epoch % 20 == 0:
-                        run["train/images"].append(
-                            neptune.types.File(
-                                f"{opt.workspace}/train/images_{epoch}_{i}_gt.jpg"
-                            )
-                        )
-
-                    # gt_alphas = data['masks_output'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
-                    # gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, gt_alphas.shape[1] * gt_alphas.shape[3], 1)
-                    # kiui.write_image(f'{opt.workspace}/train_gt_alphas_{epoch}_{i}.jpg', gt_alphas)
-
-                    pred_images = (
-                        out["images_pred"].detach().cpu().numpy()
-                    )  # [B, V, 3, output_size, output_size]
-                    pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(
-                        -1, pred_images.shape[1] * pred_images.shape[3], 3
-                    )
-                    kiui.write_image(
-                        f"{opt.workspace}/train/images_{epoch}_{i}_pred.jpg",
-                        pred_images,
-                    )
-                    if epoch % 20 == 0:
-                        run["train/images"].append(
-                            neptune.types.File(
-                                f"{opt.workspace}/train/images_{epoch}_{i}_pred.jpg"
-                            )
-                        )
-
-                    # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
-                    # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
-                    # kiui.write_image(f'{opt.workspace}/train_pred_alphas_{epoch}_{i}.jpg', pred_alphas)
+                if step % 1000 == 0:
+                    save_image(data, out, epoch, opt, run, step, mode="train")
 
         total_loss = accelerator.gather_for_metrics(total_loss).mean()
         total_psnr = accelerator.gather_for_metrics(total_psnr).mean()
@@ -199,13 +257,16 @@ def main():
         # checkpoint
         # if epoch % 10 == 0 or epoch == opt.num_epochs - 1:
         accelerator.wait_for_everyone()
-        accelerator.save_model(model, opt.workspace)
+        # accelerator.save_model(model, opt.workspace)
+        start_time = time.time()
+        accelerator.save_state(opt.workspace)
+        accelerator.print(f"[INFO] save state time: {time.time() - start_time:.2f}s")
 
         # eval
         with torch.no_grad():
             model.eval()
             total_psnr = 0
-            for i, data in enumerate(test_dataloader):
+            for step, data in enumerate(test_dataloader):
 
                 out = model(data, run=run)
 
@@ -215,36 +276,7 @@ def main():
 
                 # save some images
                 if accelerator.is_main_process:
-                    os.makedirs(f"{opt.workspace}/eval", exist_ok=True)
-                    gt_images = data['images_output'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
-                    gt_images = gt_images.transpose(0, 3, 1, 4, 2).reshape(-1, gt_images.shape[1] * gt_images.shape[3], 3) # [B*output_size, V*output_size, 3]
-                    kiui.write_image(
-                        f"{opt.workspace}/eval_gt/images_{epoch}_{i}_gt.jpg", gt_images
-                    )
-                    if epoch % 20 == 0:
-                        run["eval/images"].append(
-                            neptune.types.File(
-                                f"{opt.workspace}/eval_gt/images_{epoch}_{i}_gt.jpg"
-                            )
-                        )
-
-                    pred_images = out['images_pred'].detach().cpu().numpy() # [B, V, 3, output_size, output_size]
-                    pred_images = pred_images.transpose(0, 3, 1, 4, 2).reshape(-1, pred_images.shape[1] * pred_images.shape[3], 3)
-                    kiui.write_image(
-                        f"{opt.workspace}/eval_pred/images_{epoch}_{i}_pred.jpg",
-                        pred_images,
-                    )
-                    if epoch % 20 == 0:
-                        run["eval/images"].append(
-                            neptune.types.File(
-                                f"{opt.workspace}/eval_pred/images_{epoch}_{i}_pred.jpg"
-                            )
-                        )
-
-                    # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
-                    # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
-                    # kiui.write_image(f'{opt.workspace}/eval_pred_alphas_{epoch}_{i}.jpg', pred_alphas)
-
+                    save_image(data, out, epoch, opt, run, step, mode="eval")
             torch.cuda.empty_cache()
 
             total_psnr = accelerator.gather_for_metrics(total_psnr).mean()

@@ -58,7 +58,7 @@ class Options:
     # mixed precision
     mixed_precision: str = 'bf16'
     # learning rate
-    lr: float = 4e-4
+    lr: float = 1e-4
     # augmentation prob for grid distortion
     prob_grid_distortion: float = 0.5
     # augmentation prob for camera jitter
