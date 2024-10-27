@@ -12,6 +12,7 @@ from safetensors.torch import load_file
 import neptune
 
 import kiui
+
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 sys.path.append(os.getcwd())
 
@@ -33,7 +34,7 @@ def train_step(
 
         optimizer.zero_grad()
 
-        out = model(data, step_ratio, run=run)
+        out = model(data, step_ratio, run=run if opt.neptune else None)
         loss = out["loss"]
         psnr = out["psnr"]
         accelerator.backward(loss)
@@ -44,12 +45,13 @@ def train_step(
 
         optimizer.step()
         scheduler.step(loss)
-        run["train/learning_rate"].log(optimizer.param_groups[0]["lr"])
+        if opt.neptune:
+            run["train/learning_rate"].log(optimizer.param_groups[0]["lr"])
 
         return out
 
 
-def save_image(data, out, epoch, opt, run, step, mode="train"):
+def save_image(data, out, epoch, opt, run, step, mode="train", save_alphas=False):
     os.makedirs(f"{opt.workspace}/{mode}", exist_ok=True)
     gt_images = (
         data["images_output"].detach().cpu().numpy()
@@ -61,10 +63,30 @@ def save_image(data, out, epoch, opt, run, step, mode="train"):
         f"{opt.workspace}/{mode}/images_{epoch}_{step}_gt.jpg",
         gt_images,
     )
-    if epoch % 20 == 0:
+    if save_alphas:
+        # 获取 gt_alphas 并转换为适当的形状
+        gt_alphas = (
+            data["masks_output"].detach().cpu().numpy()
+        )  # [B, V, 1, output_size, output_size]
+        gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(
+            -1, gt_alphas.shape[1] * gt_alphas.shape[3], 1
+        )  # [B*output_size, V*output_size, 1]
+
+        # 保存 gt_alphas 为图片
+        kiui.write_image(
+            f"{opt.workspace}/{mode}/gt_alphas_{epoch}_{step}.jpg",
+            gt_alphas,
+        )
+    if epoch % 20 == 0 and opt.neptune:
         run[f"{mode}/images"].append(
             neptune.types.File(f"{opt.workspace}/{mode}/images_{epoch}_{step}_gt.jpg")
         )
+        if save_alphas:
+            run[f"{mode}/gt_alphas"].append(
+                neptune.types.File(
+                    f"{opt.workspace}/{mode}/gt_alphas_{epoch}_{step}.jpg"
+                )
+            )
 
     # gt_alphas = data['masks_output'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
     # gt_alphas = gt_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, gt_alphas.shape[1] * gt_alphas.shape[3], 1)
@@ -80,10 +102,25 @@ def save_image(data, out, epoch, opt, run, step, mode="train"):
         f"{opt.workspace}/{mode}/images_{epoch}_{step}_pred.jpg",
         pred_images,
     )
-    if epoch % 20 == 0:
+    if save_alphas:
+        pred_alphas = out["alphas_pred"].detach().cpu().numpy()
+        pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(
+            -1, pred_alphas.shape[1] * pred_alphas.shape[3], 1
+        )
+        kiui.write_image(
+            f"{opt.workspace}/{mode}/pred_alphas_{epoch}_{step}.jpg",
+            pred_alphas,
+        )
+    if epoch % 20 == 0 and opt.neptune:
         run[f"{mode}/images"].append(
             neptune.types.File(f"{opt.workspace}/{mode}/images_{epoch}_{step}_pred.jpg")
         )
+        if save_alphas:
+            run[f"{mode}/pred_alphas"].append(
+                neptune.types.File(
+                    f"{opt.workspace}/{mode}/pred_alphas_{epoch}_{step}.jpg"
+                )
+            )
 
     # pred_alphas = out['alphas_pred'].detach().cpu().numpy() # [B, V, 1, output_size, output_size]
     # pred_alphas = pred_alphas.transpose(0, 3, 1, 4, 2).reshape(-1, pred_alphas.shape[1] * pred_alphas.shape[3], 1)
@@ -114,8 +151,11 @@ def main():
     model = LGM(opt)
 
     # neptune
-    run = neptune.init_run(project="LGM", source_files=["*.py"])
-    run["parameters"] = opt.__dict__
+    if opt.neptune:
+        run = neptune.init_run(
+            project="LGM", tags=[suffix.split("_")[-2:]], source_files=["**/*.py"]
+        )
+        run["parameters"] = opt.__dict__
 
     # # resume
     # if opt.resume is not None:
@@ -138,7 +178,7 @@ def main():
     #             accelerator.print(f'[WARN] unexpected param {k}: {v.shape}')
 
     # data
-    if opt.data_mode == 's3':
+    if opt.data_mode == "s3":
         from core.provider_objaverse import ObjaverseDataset as Dataset
     else:
         raise NotImplementedError
@@ -164,7 +204,9 @@ def main():
     )
 
     # optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=0.05, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=opt.lr, weight_decay=0.05, betas=(0.9, 0.95)
+    )
 
     # scheduler (per-iteration)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=3000, eta_min=1e-6)
@@ -183,12 +225,17 @@ def main():
         eps=1e-08,
     )
     # accelerate
-    model, optimizer, train_dataloader, test_dataloader, scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, test_dataloader, scheduler
+    model, optimizer, train_dataloader, test_dataloader, scheduler = (
+        accelerator.prepare(
+            model, optimizer, train_dataloader, test_dataloader, scheduler
+        )
     )
     # accelerator.register_for_checkpointing(scheduler)
     if opt.resume:
         accelerator.load_state(os.path.join(os.getcwd(), opt.resume))
+
+    if accelerator.is_main_process:
+        run["sys/tags"].add("main_process")
 
     # eval for resume
     if opt.resume:
@@ -196,9 +243,10 @@ def main():
             model.eval()
             total_psnr = 0
             for step, data in enumerate(test_dataloader):
-                out = model(data, run=run)
+                out = model(data, run=run if opt.neptune else None)
                 psnr = out["psnr"]
-                run["eval/psnr"].log(psnr.item())
+                if opt.neptune:
+                    run["eval/psnr"].log(psnr.item())
                 total_psnr += psnr.detach()
             torch.cuda.empty_cache()
 
@@ -226,7 +274,7 @@ def main():
                 train_dataloader,
                 epoch,
                 opt,
-                run,
+                run if opt.neptune else None,
             )
             loss = out["loss"]
             psnr = out["psnr"]
@@ -245,14 +293,24 @@ def main():
 
                 # save log images
                 if step % 1000 == 0:
-                    save_image(data, out, epoch, opt, run, step, mode="train")
+                    save_image(
+                        data,
+                        out,
+                        epoch,
+                        opt,
+                        run if opt.neptune else None,
+                        step,
+                        mode="train",
+                    )
 
         total_loss = accelerator.gather_for_metrics(total_loss).mean()
         total_psnr = accelerator.gather_for_metrics(total_psnr).mean()
         if accelerator.is_main_process:
             total_loss /= len(train_dataloader)
             total_psnr /= len(train_dataloader)
-            accelerator.print(f"[train] epoch: {epoch} loss: {total_loss.item():.6f} psnr: {total_psnr.item():.4f}")
+            accelerator.print(
+                f"[train] epoch: {epoch} loss: {total_loss.item():.6f} psnr: {total_psnr.item():.4f}"
+            )
 
         # checkpoint
         # if epoch % 10 == 0 or epoch == opt.num_epochs - 1:
@@ -270,13 +328,22 @@ def main():
 
                 out = model(data, run=run)
 
-                psnr = out['psnr']
-                run["eval/psnr"].log(psnr.item())
+                psnr = out["psnr"]
+                if opt.neptune:
+                    run["eval/psnr"].log(psnr.item())
                 total_psnr += psnr.detach()
 
                 # save some images
                 if accelerator.is_main_process:
-                    save_image(data, out, epoch, opt, run, step, mode="eval")
+                    save_image(
+                        data,
+                        out,
+                        epoch,
+                        opt,
+                        run if opt.neptune else None,
+                        step,
+                        mode="eval",
+                    )
             torch.cuda.empty_cache()
 
             total_psnr = accelerator.gather_for_metrics(total_psnr).mean()
