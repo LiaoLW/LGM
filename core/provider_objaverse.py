@@ -85,24 +85,32 @@ class ObjaverseDataset(Dataset):
                 uid_last = uid.split("/")[-1]
 
                 image_path = os.path.join(
-                    uid_last, "campos_512_v4", f"{vid:05d}/{vid:05d}.png"
+                    self.opt.data_path, f"{uid}", f"{vid:05d}/{vid:05d}.png"
                 )
                 meta_path = os.path.join(
-                    uid_last, "campos_512_v4", f"{vid:05d}/{vid:05d}.json"
+                    self.opt.data_path, f"{uid}", f"{vid:05d}/{vid:05d}.json"
                 )
-                # albedo_path = os.path.join(uid_last, 'campos_512_v4', f"{vid:05d}/{vid:05d}_albedo.png") # black bg...
-                # mr_path = os.path.join(uid_last, 'campos_512_v4', f"{vid:05d}/{vid:05d}_mr.png")
+                # albedo_path = os.path.join( self.opt.data_path, f"{uid}", 'campos_512_v4', f"{vid:05d}/{vid:05d}_albedo.png") # black bg...
+                # mr_path = os.path.join( self.opt.data_path, f"{uid}", 'campos_512_v4', f"{vid:05d}/{vid:05d}_mr.png")
                 nd_path = os.path.join(
-                    uid_last, "campos_512_v4", f"{vid:05d}/{vid:05d}_nd.exr"
+                    self.opt.data_path,
+                    f"{uid}",
+                    f"{vid:05d}/{vid:05d}_nd.exr",
                 )
 
-                with tarfile.open(tar_path, "r") as tar:
-                    with tar.extractfile(image_path) as f:
-                        image = np.frombuffer(f.read(), np.uint8)
-                    with tar.extractfile(meta_path) as f:
-                        meta = json.loads(f.read().decode())
-                    with tar.extractfile(nd_path) as f:
-                        nd = np.frombuffer(f.read(), np.uint8)
+                # with tarfile.open(tar_path, "r") as tar:
+                #     with tar.extractfile(image_path) as f:
+                #         image = np.frombuffer(f.read(), np.uint8)
+                #     with tar.extractfile(meta_path) as f:
+                #         meta = json.loads(f.read().decode())
+                #     with tar.extractfile(nd_path) as f:
+                #         nd = np.frombuffer(f.read(), np.uint8)
+                with open(image_path, "rb") as f:
+                    image = np.frombuffer(f.read(), np.uint8)
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                with open(nd_path, "rb") as f:
+                    nd = np.frombuffer(f.read(), np.uint8)
 
                 image = torch.from_numpy(cv2.imdecode(image, cv2.IMREAD_UNCHANGED).astype(np.float32) / 255) # [512, 512, 4] in [0, 1]
 
@@ -128,7 +136,7 @@ class ObjaverseDataset(Dataset):
                 depth = torch.from_numpy(depth.astype(np.float32)).nan_to_num_(0)
 
             except Exception as e:
-                # print(f"[WARN] dataset {uid} {vid}: {e}")
+                print(f"[WARN] dataset {uid} {vid}: {e}")
                 continue
 
             # TODO: you may have a different camera system
