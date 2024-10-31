@@ -153,7 +153,9 @@ def main():
     # neptune
     if opt.neptune:
         run = neptune.init_run(
-            project="LGM", tags=[suffix.split("_")[-2:]], source_files=["**/*.py"]
+            project="LGM",
+            tags=["".join(suffix.split("_")[-2:])],
+            source_files=["**/*.py"],
         )
         run["parameters"] = opt.__dict__
 
@@ -301,6 +303,7 @@ def main():
                         run if opt.neptune else None,
                         step,
                         mode="train",
+                        save_alphas=opt.save_alphas,
                     )
 
         total_loss = accelerator.gather_for_metrics(total_loss).mean()
@@ -343,6 +346,7 @@ def main():
                         run if opt.neptune else None,
                         step,
                         mode="eval",
+                        save_alphas=opt.save_alphas,
                     )
             torch.cuda.empty_cache()
 

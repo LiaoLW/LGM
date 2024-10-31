@@ -5,6 +5,9 @@ from typing import Tuple, Literal, Dict, Optional
 
 @dataclass
 class Options:
+    ### logging
+    neptune: bool = True
+    save_alphas: bool = False
     ### model
     # Unet image input size
     input_size: int = 256
