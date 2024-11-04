@@ -136,7 +136,7 @@ class ObjaverseDataset(Dataset):
                 depth = torch.from_numpy(depth.astype(np.float32)).nan_to_num_(0)
 
             except Exception as e:
-                print(f"[WARN] dataset {uid} {vid}: {e}")
+                # print(f"[WARN] dataset {uid} {vid}: {e}")
                 continue
 
             # TODO: you may have a different camera system

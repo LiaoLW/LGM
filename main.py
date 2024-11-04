@@ -82,7 +82,7 @@ def save_image(data, out, epoch, opt, run, step, mode="train", save_alphas=False
             neptune.types.File(f"{opt.workspace}/{mode}/images_{epoch}_{step}_gt.jpg")
         )
         if save_alphas:
-            run[f"{mode}/gt_alphas"].append(
+            run[f"{mode}/alphas"].append(
                 neptune.types.File(
                     f"{opt.workspace}/{mode}/gt_alphas_{epoch}_{step}.jpg"
                 )
@@ -116,7 +116,7 @@ def save_image(data, out, epoch, opt, run, step, mode="train", save_alphas=False
             neptune.types.File(f"{opt.workspace}/{mode}/images_{epoch}_{step}_pred.jpg")
         )
         if save_alphas:
-            run[f"{mode}/pred_alphas"].append(
+            run[f"{mode}/alphas"].append(
                 neptune.types.File(
                     f"{opt.workspace}/{mode}/pred_alphas_{epoch}_{step}.jpg"
                 )
@@ -130,7 +130,7 @@ def save_image(data, out, epoch, opt, run, step, mode="train", save_alphas=False
 def main():
     opt = tyro.cli(AllConfigs)
     if opt.resume is not None:
-        suffix = "resume_" + opt.resume.split("/")[-1]
+        suffix = "resume_" + os.path.basename(opt.resume)
     else:
         suffix = f"{time.strftime('%Y%m%d_%H%M')}"
     if opt.exp is not None:
@@ -223,7 +223,7 @@ def main():
         threshold=0.0001,
         threshold_mode="rel",
         cooldown=0,
-        min_lr=1e-5,
+        min_lr=5e-5,
         eps=1e-08,
     )
     # accelerate
@@ -235,6 +235,25 @@ def main():
     # accelerator.register_for_checkpointing(scheduler)
     if opt.resume:
         accelerator.load_state(os.path.join(os.getcwd(), opt.resume))
+    for g in optimizer.param_groups:
+        g["lr"] = 5e-5
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.98,
+        patience=10,
+        verbose=True,
+        threshold=0.0001,
+        threshold_mode="rel",
+        cooldown=0,
+        min_lr=5e-5,
+        eps=1e-08,
+    )
+    model, optimizer, train_dataloader, test_dataloader, scheduler = (
+        accelerator.prepare(
+            model, optimizer, train_dataloader, test_dataloader, scheduler
+        )
+    )
 
     if accelerator.is_main_process:
         run["sys/tags"].add("main_process")
