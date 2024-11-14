@@ -255,7 +255,7 @@ def main():
         )
     )
 
-    if accelerator.is_main_process:
+    if opt.neptune and accelerator.is_main_process:
         run["sys/tags"].add("main_process")
 
     # eval for resume
@@ -278,6 +278,9 @@ def main():
 
     # loop
     for epoch in range(opt.num_epochs):
+        if opt.neptune and epoch > 2000:
+            run["sys/tags"].add("valid")
+
         # train
         model.train()
         total_loss = 0
@@ -348,7 +351,7 @@ def main():
             total_psnr = 0
             for step, data in enumerate(test_dataloader):
 
-                out = model(data, run=run)
+                out = model(data, run=run if opt.neptune else None)
 
                 psnr = out["psnr"]
                 if opt.neptune:

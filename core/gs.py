@@ -15,10 +15,10 @@ import kiui
 
 class GaussianRenderer:
     def __init__(self, opt: Options):
-        
+
         self.opt = opt
         self.bg_color = torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda")
-        
+
         # intrinsics
         self.tan_half_fov = np.tan(0.5 * np.deg2rad(self.opt.fovy))
         self.proj_matrix = torch.zeros(4, 4, dtype=torch.float32)
@@ -27,7 +27,7 @@ class GaussianRenderer:
         self.proj_matrix[2, 2] = (opt.zfar + opt.znear) / (opt.zfar - opt.znear)
         self.proj_matrix[3, 2] = - (opt.zfar * opt.znear) / (opt.zfar - opt.znear)
         self.proj_matrix[2, 3] = 1
-        
+
     def render(self, gaussians, cam_view, cam_view_proj, cam_pos, bg_color=None, scale_modifier=1):
         # gaussians: [B, N, 14]
         # cam_view, cam_view_proj: [B, V, 4, 4]
@@ -49,9 +49,9 @@ class GaussianRenderer:
             rgbs = gaussians[b, :, 11:].contiguous().float() # [N, 3]
 
             for v in range(V):
-                
+
                 # render novel views
-                view_matrix = cam_view[b, v].float()
+                view_matrix = cam_view[b, v].float() # [4, 4] in matrix form
                 view_proj_matrix = cam_view_proj[b, v].float()
                 campos = cam_pos[b, v].float()
 
@@ -97,7 +97,6 @@ class GaussianRenderer:
             "alpha": alphas, # [B, V, 1, H, W]
         }
 
-
     def save_ply(self, gaussians, path, compatible=True):
         # gaussians: [B, N, 14]
         # compatible: save pre-activated gaussians as in the original paper
@@ -105,7 +104,7 @@ class GaussianRenderer:
         assert gaussians.shape[0] == 1, 'only support batch size 1'
 
         from plyfile import PlyData, PlyElement
-     
+
         means3D = gaussians[0, :, 0:3].contiguous().float()
         opacity = gaussians[0, :, 3:4].contiguous().float()
         scales = gaussians[0, :, 4:7].contiguous().float()
@@ -150,7 +149,7 @@ class GaussianRenderer:
         el = PlyElement.describe(elements, 'vertex')
 
         PlyData([el]).write(path)
-    
+
     def load_ply(self, path, compatible=True):
 
         from plyfile import PlyData, PlyElement
@@ -178,7 +177,7 @@ class GaussianRenderer:
         rots = np.zeros((xyz.shape[0], len(rot_names)))
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
-          
+
         gaussians = np.concatenate([xyz, opacities, scales, rots, shs], axis=1)
         gaussians = torch.from_numpy(gaussians).float() # cpu
 
